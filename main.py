@@ -32,14 +32,14 @@ PROVIDERS_CONFIG = {
         "token_inflation": 1.0,
 
         #Model name
-        "default_model": "llama3-8b-8192",
+        "default_model": "llama-3.1-8b-instant",
     },
     "together": {
         "url": "https://api.together.xyz/v1/chat/completions",
         "api_key": os.getenv("TOGETHER_API_KEY", ""),
         "accuracy": 0.85,
         "token_inflation": 1.1,
-        "default_model": "meta-llama/Llama-3-8b-chat-hf",
+        "default_model": "meta-llama/Llama-3.1-8B-Instruct-Turbo",
     },
     "deepseek": {
         "url": "https://api.deepseek.com/v1/chat/completions",

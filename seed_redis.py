@@ -34,7 +34,7 @@ async def seed():
         await pipe.execute()
         
     print("Successfully seeded provider states! Closing connection.")
-    await r.close()
+    await r.aclose()
 
 if __name__ == "__main__":
     asyncio.run(seed())
