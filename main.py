@@ -120,21 +120,19 @@ async def telemetry_failure(redis_client, provider: str):
         print(f"[TELEMETRY ERROR] {provider} failure write-back failed: {e}")
 
 
-def is_routable(provider: str, metrics: dict) -> bool:
-    #Read current providers redis metrics
+def circuit_state(provider: str, metrics: dict) -> str:
+    #returns current circuit state, accounting for cooldown expiry
     status = metrics.get("circuit_status", "closed")
     if status == "closed":
-        return True
-    #Check if cooldown period has ended if circuit failed
+        return "closed"
     if status == "open":
         opened_at = float(metrics.get("circuit_opened_at", 0))
+        #cooldown expired, transition to half_open
         if time.time() - opened_at >= CIRCUIT_HALF_OPEN_AFTER_S:
-            print(f"[CIRCUIT BREAKER] {provider} entering HALF-OPEN — sending recovery probe")
-            return True
-        return False
-    if status == "half_open":
-        return True
-    return True
+            return "half_open"
+        return "open"
+    #half_open persisted from a previous transition
+    return "half_open"
 
 
 async def stream_from_provider(provider, cfg, body, http_client, redis_client):
@@ -196,13 +194,38 @@ async def route_llm_request(request: Request):
         raw_stats = await pipe.execute()
 
     live_metrics = {provider_keys[i]: raw_stats[i] for i in range(len(provider_keys))}
-    scored = []
 
-    #score each provider, skip any with open circuits
+    #check for half open providers first, bypass scoring
+    #a half open provider has a terrible error_rate score and would never win otherwise
+    probe_provider = None
+    for provider in provider_keys:
+        state = circuit_state(provider, live_metrics.get(provider, {}))
+        if state == "half_open":
+            probe_provider = provider
+            break
+
+    if probe_provider:
+        #write half_open to redis so the health endpoint reflects it
+        await redis_client.hset(f"provider:{probe_provider}", "circuit_status", "half_open")
+        routing_overhead_ms = (time.perf_counter() - start_routing) * 1000
+        print(f"[CIRCUIT BREAKER] {probe_provider} HALF-OPEN — sending recovery probe (overhead: {routing_overhead_ms:.2f}ms)")
+        return StreamingResponse(
+            stream_from_provider(probe_provider, PROVIDERS_CONFIG[probe_provider], body, http_client, redis_client),
+            media_type="text/event-stream",
+            headers={
+                "X-Routed-To": probe_provider,
+                "X-Routing-Overhead-Ms": f"{routing_overhead_ms:.2f}",
+                "Cache-Control": "no-cache",
+            },
+        )
+
+    #normal scoring path, no half open probes needed
+    scored = []
     for provider, cfg in PROVIDERS_CONFIG.items():
         metrics = live_metrics.get(provider, {})
-        if not is_routable(provider, metrics):
-            print(f"[ROUTER] Skipping {provider} — circuit OPEN")
+        state = circuit_state(provider, metrics)
+        if state != "closed":
+            print(f"[ROUTER] Skipping {provider} — circuit {state.upper()}")
             continue
         live_ttft = float(metrics.get("ttft", 300.0))
         live_error_rate = float(metrics.get("error_rate", 0.0))
